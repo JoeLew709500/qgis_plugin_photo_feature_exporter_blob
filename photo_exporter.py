@@ -80,7 +80,23 @@ class PhotoExporter:
         if data_source is None:
             raise RuntimeError(f"Failed to create data source at {output_path}.")
         layer_name = layer.name()  # Use the original layer's name
-        gpkg_layer = data_source.CreateLayer(layer_name, geom_type=ogr.wkbPoint)
+        
+        # Get the geometry type from the original layer
+        geometry_type = layer.geometryType()
+        
+        # Map QGIS geometry types to OGR geometry types
+        if geometry_type == 0:  # Point
+            ogr_geom_type = ogr.wkbPoint
+        elif geometry_type == 1:  # LineString
+            ogr_geom_type = ogr.wkbLineString
+        elif geometry_type == 2:  # Polygon
+            ogr_geom_type = ogr.wkbPolygon
+        else:
+            self.iface.messageBar().pushMessage("Error", "Unsupported geometry type.", level=3)
+            return
+        
+        
+        gpkg_layer = data_source.CreateLayer(layer_name, geom_type=ogr_geom_type) # Use the determined OGR geometry type
         if gpkg_layer is None:
             raise RuntimeError("Failed to create layer in GeoPackage.")
 
@@ -129,8 +145,12 @@ class PhotoExporter:
                     value = feature[field.name()]
                     if isinstance(value, QVariant):
                         value = value.toPyObject()  # Convert QVariant to native Python type
+                    try:
+                         new_feature.SetField(field.name(), value)
+                    except TypeError as e:
+                        self.iface.messageBar().pushMessage("Error", f"Type error setting field {field.name()}: {e}", level=2)
+                        continue # Skip to the next field
 
-                    new_feature.SetField(field.name(), value)
             
             # Handle the photo fields (relative or absolute paths)
             for photo_field_name in photo_field_names:
@@ -174,7 +194,7 @@ class PhotoExporter:
         layer_source = layer.source()
         if layer_source:
             uri = QgsDataSourceUri(layer_source)
-            layer_path = uri.uri()  # Get the layer's file path from the URI
+            layer_path = uri.uri(   )  # Get the layer's file path from the URI
             if layer_path:
                 absolute_path = os.path.join(os.path.dirname(layer_path), photo_path_value)
                 if os.path.exists(absolute_path):
