@@ -1,0 +1,7 @@
+[general]
+name=Photo Exporter
+description=Exports photos as blob to a GeoPackage with features
+version=1.0
+qgisMinimumVersion=3.0
+author=Joe Lewis
+email=j.lewis709500@gmail.com
