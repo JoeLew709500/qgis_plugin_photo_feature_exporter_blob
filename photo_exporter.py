@@ -1,10 +1,9 @@
-from qgis.core import QgsProject, QgsPathResolver, QgsDataSourceUri
+from qgis.core import QgsProject, QgsPathResolver, QgsDataSourceUri, QgsGeometry
 from qgis.utils import iface
 from osgeo import ogr
 from PyQt5.QtWidgets import QAction, QDialog
-from PyQt5.QtCore import QCoreApplication
+from PyQt5.QtCore import QCoreApplication, QVariant
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QVariant
 import os
 from .photo_exporter_dialog import PhotoExporterDialog
 
@@ -80,10 +79,10 @@ class PhotoExporter:
         if data_source is None:
             raise RuntimeError(f"Failed to create data source at {output_path}.")
         layer_name = layer.name()  # Use the original layer's name
-        
+
         # Get the geometry type from the original layer
         geometry_type = layer.geometryType()
-        
+
         # Map QGIS geometry types to OGR geometry types
         if geometry_type == 0:  # Point
             ogr_geom_type = ogr.wkbPoint
@@ -91,11 +90,17 @@ class PhotoExporter:
             ogr_geom_type = ogr.wkbLineString
         elif geometry_type == 2:  # Polygon
             ogr_geom_type = ogr.wkbPolygon
+        elif geometry_type == 3:  # MultiPoint
+            ogr_geom_type = ogr.wkbMultiPoint
+        elif geometry_type == 4:  # MultiLineString
+            ogr_geom_type = ogr.wkbMultiLineString
+        elif geometry_type == 5:  # MultiPolygon
+            ogr_geom_type = ogr.wkbMultiPolygon
         else:
             self.iface.messageBar().pushMessage("Error", "Unsupported geometry type.", level=3)
             return
-        
-        
+
+
         gpkg_layer = data_source.CreateLayer(layer_name, geom_type=ogr_geom_type) # Use the determined OGR geometry type
         if gpkg_layer is None:
             raise RuntimeError("Failed to create layer in GeoPackage.")
@@ -117,6 +122,8 @@ class PhotoExporter:
                     ogr_field_type = ogr.OFTDate  # Handle Date
                 elif field.typeName() == 'DateTime':
                      ogr_field_type = ogr.OFTDateTime # Handle DateTime
+                elif field.typeName() == 'String':
+                    ogr_field_type = ogr.OFTString
                 # Add more type conversions as needed
                 field_defn = ogr.FieldDefn(field.name(), ogr_field_type)
                 # Corrected: Use SetPrecision (capitalized)
@@ -124,7 +131,7 @@ class PhotoExporter:
                     field_defn.SetPrecision(field.precision()) # Keep the precision
                 field_defn.SetWidth(field.length())         # Keep the length
                 gpkg_layer.CreateField(field_defn)
-        
+
         # Create fields for photo blobs *after* other fields
         for photo_field_name in photo_field_names:
             field_defn = ogr.FieldDefn(photo_field_name, ogr.OFTBinary)
@@ -134,44 +141,78 @@ class PhotoExporter:
 
         for feature in features:
             geom = feature.geometry()
-            new_feature = ogr.Feature(gpkg_layer.GetLayerDefn())
-            new_feature.SetGeometry(ogr.CreateGeometryFromWkt(geom.asWkt()))
+            if geom:
+                new_feature = ogr.Feature(gpkg_layer.GetLayerDefn())
+                new_feature.SetGeometry(ogr.CreateGeometryFromWkt(geom.asWkt()))
 
-            # Set attribute values (excluding photo fields)
-            for i in range(layer_defn.count()):
-                field = layer_defn.field(i)
-                if field.name() not in photo_field_names:
-                    # Get the value and handle potential QVariant conversion
-                    value = feature[field.name()]
-                    if isinstance(value, QVariant):
-                        value = value.toPyObject()  # Convert QVariant to native Python type
-                    try:
-                         new_feature.SetField(field.name(), value)
-                    except TypeError as e:
-                        self.iface.messageBar().pushMessage("Error", f"Type error setting field {field.name()}: {e}", level=2)
-                        continue # Skip to the next field
+                # Set attribute values (excluding photo fields)
+                for i in range(layer_defn.count()):
+                    field = layer_defn.field(i)
+                    if field.name() not in photo_field_names:
+                        # Get the value and handle potential QVariant conversion
+                        value = feature[field.name()]
+                        if isinstance(value, QVariant):
+                            # Corrected: Use standard Python conversion
+                            value = value.value()
+                        try:
+                                new_feature.SetField(field.name(), value)
+                        except TypeError as e:
+                            self.iface.messageBar().pushMessage("Error", f"Type error setting field {field.name()}: {e}", level=2)
+                            continue # Skip to the next field
 
-            
-            # Handle the photo fields (relative or absolute paths)
-            for photo_field_name in photo_field_names:
-                photo_path_value = feature[photo_field_name]
-                if isinstance(photo_path_value, QVariant):
-                    photo_path_value = str(photo_path_value)  # Convert QVariant to string
 
-                if not photo_path_value or len(photo_path_value) < 5:  # More robust check for empty/invalid paths
-                    continue  # Skip NULL or very short values
+                # Handle the photo fields (relative or absolute paths)
+                for photo_field_name in photo_field_names:
+                    photo_path_value = feature[photo_field_name]
+                    if isinstance(photo_path_value, QVariant):
+                        photo_path_value = str(photo_path_value)  # Convert QVariant to string
 
-                # Resolve relative paths
-                photo_path = self.resolve_path(photo_path_value, layer)
+                    if not photo_path_value or len(photo_path_value) < 5:  # More robust check for empty/invalid paths
+                        continue  # Skip NULL or very short values
 
-                if photo_path:  # Check if path resolution was successful
-                    photo_blob = self.convert_photo_to_blob(photo_path)
-                    if photo_blob: # Only set the field if the blob was created
-                       new_feature.SetField(photo_field_name, photo_blob)
-                #else:  #Optionally handle unresolved paths
-                    # print(f"Could not resolve path: {photo_path_value}")
+                    # Resolve relative paths
+                    photo_path = self.resolve_path(photo_path_value, layer)
 
-            gpkg_layer.CreateFeature(new_feature)
+                    if photo_path:  # Check if path resolution was successful
+                        photo_blob = self.convert_photo_to_blob(photo_path)
+                        if photo_blob: # Only set the field if the blob was created
+                           new_feature.SetField(photo_field_name, photo_blob)
+                    #else:  #Optionally handle unresolved paths
+                        # print(f"Could not resolve path: {photo_path_value}")
+
+                gpkg_layer.CreateFeature(new_feature)
+            else:
+                # Handle features without geometry (e.g., non-spatial table entries)
+                new_feature = ogr.Feature(gpkg_layer.GetLayerDefn())
+                for i in range(layer_defn.count()):
+                    field = layer_defn.field(i)
+                    if field.name() not in photo_field_names:
+                        value = feature[field.name()]
+                        if isinstance(value, QVariant):
+                           # Corrected use .value()
+                           value = value.value()
+                        try:
+                            new_feature.SetField(field.name(), value)
+                        except TypeError as e:
+                            self.iface.messageBar().pushMessage("Error", f"Type error setting field {field.name()}: {e}", level=2)
+                            continue
+
+                for photo_field_name in photo_field_names:
+                    photo_path_value = feature[photo_field_name]
+                    if isinstance(photo_path_value, QVariant):
+                        photo_path_value = str(photo_path_value)
+
+                    if not photo_path_value or len(photo_path_value) < 5:
+                        continue
+
+                    photo_path = self.resolve_path(photo_path_value, layer)
+                    if photo_path:
+                        photo_blob = self.convert_photo_to_blob(photo_path)
+                        if photo_blob:
+                            new_feature.SetField(photo_field_name, photo_blob)
+                gpkg_layer.CreateFeature(new_feature)
+
+
         data_source = None
 
 
@@ -194,12 +235,12 @@ class PhotoExporter:
         layer_source = layer.source()
         if layer_source:
             uri = QgsDataSourceUri(layer_source)
-            layer_path = uri.uri(   )  # Get the layer's file path from the URI
+            layer_path = uri.uri()  # Get the layer's file path from the URI
             if layer_path:
                 absolute_path = os.path.join(os.path.dirname(layer_path), photo_path_value)
                 if os.path.exists(absolute_path):
                   return absolute_path
-                    
+
 
         # 4. If none of the above work, the path cannot be resolved
         return None
